@@ -1,228 +1,514 @@
 #!/bin/bash
 
-# Get the current branch and base branch
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+# =============================================================================
+# stack-submit.sh - Automated stacked PR creation tool
+# =============================================================================
+# This script automates the process of pushing branches and creating chained
+# pull requests for git stacks.
+#
+# Usage: ./stack-submit.sh
+#
+# Requirements:
+#   - git: Must be installed and configured
+#   - gh (GitHub CLI): Required for PR creation, must be authenticated
+#
+# Environment Variables:
+#   - ALLOW_FORCE_PUSH: Set to "1" to allow regular force push as last resort
+#                       (default: disabled for safety)
+# =============================================================================
 
-# Try to get the trunk branch (usually main or master)
-BASE_BRANCH=$(git rev-parse --abbrev-ref @{upstream} 2>/dev/null | sed 's|origin/||' || echo "")
-if [ -z "$BASE_BRANCH" ]; then
-	# Try common trunk branch names
-	for TRUNK in main master; do
-		if git show-ref --verify --quiet refs/heads/"$TRUNK" 2>/dev/null || git ls-remote --exit-code --heads origin "$TRUNK" &>/dev/null; then
-			BASE_BRANCH="$TRUNK"
-			break
-		fi
-	done
-	# Default fallback
-	[ -z "$BASE_BRANCH" ] && BASE_BRANCH="master"
-fi
+set -euo pipefail
 
-# Get all branches in the stack
-echo "🔍 Getting branches in stack..."
-BRANCH_ARRAY=()
+# =============================================================================
+# Configuration
+# =============================================================================
+readonly SCRIPT_NAME="stack-submit"
+readonly VERSION="1.0.0"
 
-# Find ALL branches that are ancestors of the current branch and have unique commits
-ALL_BRANCHES=$(git branch --format='%(refname:short)' | grep -v "^$BASE_BRANCH$" || echo "")
+# =============================================================================
+# Utility Functions
+# =============================================================================
 
-# Collect all candidate branches (ancestors of current branch with unique commits)
-CANDIDATE_BRANCHES=()
+# Print an informational message
+log_info() {
+    echo "$1"
+}
 
-# Always include current branch
-CANDIDATE_BRANCHES+=("$CURRENT_BRANCH")
+# Print a success message
+log_success() {
+    echo "   ✅ $1"
+}
 
-# Find all other branches that are ancestors of current branch
-for OTHER_BRANCH in $ALL_BRANCHES; do
-	# Skip current branch (already added)
-	[ "$OTHER_BRANCH" = "$CURRENT_BRANCH" ] && continue
-	
-	# Check if OTHER_BRANCH is an ancestor of CURRENT_BRANCH
-	if git merge-base --is-ancestor "$OTHER_BRANCH" "$CURRENT_BRANCH" 2>/dev/null; then
-		# Check if OTHER_BRANCH has commits not in base (it's part of the stack)
-		COMMITS_NOT_IN_BASE=$(git rev-list --count "$BASE_BRANCH".."$OTHER_BRANCH" 2>/dev/null || echo "0")
-		if [ "$COMMITS_NOT_IN_BASE" -gt 0 ]; then
-			# This branch is part of the stack
-			CANDIDATE_BRANCHES+=("$OTHER_BRANCH")
-		fi
-	fi
-done
+# Print a warning message
+log_warning() {
+    echo "   ⚠️  $1"
+}
 
-# Sort branches by number of commits from base (fewest first = earliest in stack)
-# This gives us the order: base -> branch1 -> branch2 -> ... -> current
-# Create a temporary file to store branch:commit_count pairs for sorting
-TEMP_FILE=$(mktemp)
-for BRANCH in "${CANDIDATE_BRANCHES[@]}"; do
-	COMMIT_COUNT=$(git rev-list --count "$BASE_BRANCH".."$BRANCH" 2>/dev/null || echo "999999")
-	printf "%05d %s\n" "$COMMIT_COUNT" "$BRANCH" >> "$TEMP_FILE"
-done
+# Print a skip message
+log_skip() {
+    echo "   ⏭️  $1"
+}
 
-# Sort by commit count and extract branch names
-SORTED_BRANCHES=$(sort -n "$TEMP_FILE" | awk '{print $2}')
-rm -f "$TEMP_FILE"
+# =============================================================================
+# Git Helper Functions
+# =============================================================================
 
-# Convert to array
-BRANCH_ARRAY=()
-while IFS= read -r BRANCH; do
-	[ -n "$BRANCH" ] && BRANCH_ARRAY+=("$BRANCH")
-done <<< "$SORTED_BRANCHES"
+# Get the current branch name
+# Returns: branch name on stdout, exits with error if not in a git repository
+get_current_branch() {
+    local branch
+    if ! branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null); then
+        log_info "❌ Error: Not in a git repository or git is not installed"
+        exit 1
+    fi
+    echo "$branch"
+}
 
-echo "📋 Found ${#BRANCH_ARRAY[@]} branch(es) in stack:"
-for BRANCH in "${BRANCH_ARRAY[@]}"; do
-	COMMIT_COUNT=$(git rev-list --count "$BASE_BRANCH".."$BRANCH" 2>/dev/null || echo "?")
-	echo "  - $BRANCH ($COMMIT_COUNT commits from $BASE_BRANCH)"
-done
+# Check if a branch exists locally
+# Arguments:
+#   $1 - branch: The branch name to check
+# Returns: 0 if exists, 1 if not
+branch_exists_locally() {
+    local branch="$1"
+    git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null
+}
 
-# Push all branches in the stack
-echo ""
-echo "📤 Pushing branches to remote..."
-PUSH_FAILED=0
-for BRANCH in "${BRANCH_ARRAY[@]}"; do
-	# Check if branch exists locally
-	if git show-ref --verify --quiet refs/heads/"$BRANCH" 2>/dev/null; then
-		echo "📤 Pushing $BRANCH..."
-		
-		# Check if branch exists remotely
-		BRANCH_EXISTS_REMOTELY=$(git ls-remote --exit-code --heads origin "$BRANCH" 2>/dev/null && echo "yes" || echo "no")
-		
-		# Try regular push first
-		if git push origin "$BRANCH" 2>/dev/null; then
-			echo "   ✅ Pushed $BRANCH"
-		elif [ "$BRANCH_EXISTS_REMOTELY" = "no" ]; then
-			# Branch doesn't exist remotely, try to set upstream
-			if git push -u origin "$BRANCH" 2>/dev/null; then
-				echo "   ✅ Pushed $BRANCH (set upstream)"
-			else
-				echo "   ⚠️  Failed to push $BRANCH"
-				PUSH_FAILED=1
-			fi
-		else
-			# Branch exists remotely but push failed - likely needs force push
-			# Try force-with-lease first (safer - only force if remote hasn't changed)
-			if git push --force-with-lease origin "$BRANCH" 2>/dev/null; then
-				echo "   ✅ Force-pushed $BRANCH (with lease)"
-			else
-				# Force-with-lease failed, try regular force push
-				if git push --force origin "$BRANCH" 2>/dev/null; then
-					echo "   ✅ Force-pushed $BRANCH"
-				else
-					echo "   ⚠️  Failed to push $BRANCH (even with force)"
-					PUSH_FAILED=1
-				fi
-			fi
-		fi
-	else
-		echo "   ⏭️  Skipping $BRANCH (branch doesn't exist locally)"
-	fi
-done
+# Check if a branch exists on the remote (origin)
+# Arguments:
+#   $1 - branch: The branch name to check
+# Returns: 0 if exists on remote, 1 if not
+branch_exists_remotely() {
+    local branch="$1"
+    git ls-remote --exit-code --heads origin "$branch" &>/dev/null
+}
 
-if [ $PUSH_FAILED -eq 1 ]; then
-	echo ""
-	echo "⚠️  Some branches failed to push. Continuing with PR creation..."
-fi
+# Get the number of commits between two branches
+# Arguments:
+#   $1 - base: The base branch
+#   $2 - branch: The target branch
+# Returns: Number of commits on stdout (0 if error)
+get_commit_count() {
+    local base="$1"
+    local branch="$2"
+    git rev-list --count "$base".."$branch" 2>/dev/null || echo "0"
+}
 
-# Check if GitHub CLI is available
-if ! command -v gh &> /dev/null; then
-	echo "⚠️  GitHub CLI (gh) is not installed."
-	echo "   Install it with: brew install gh"
-	echo "   Or create PRs manually at: https://github.com/$(git config --get remote.origin.url | sed -E 's/.*github.com[:/]([^/]+\/[^/]+)\.git/\1/')"
-	exit 0
-fi
+# Check if one branch is an ancestor of another
+# Arguments:
+#   $1 - ancestor: The potential ancestor branch
+#   $2 - descendant: The potential descendant branch
+# Returns: 0 if ancestor is an ancestor of descendant, 1 otherwise
+is_ancestor() {
+    local ancestor="$1"
+    local descendant="$2"
+    git merge-base --is-ancestor "$ancestor" "$descendant" 2>/dev/null
+}
 
-# Check if authenticated with GitHub
-if ! gh auth status &> /dev/null; then
-	echo "⚠️  Not authenticated with GitHub CLI."
-	echo "   Run: gh auth login"
-	exit 0
-fi
+# =============================================================================
+# Core Functions
+# =============================================================================
 
-# Get the repository name
-REPO=$(git config --get remote.origin.url | sed -E 's/.*github.com[:/]([^/]+\/[^/]+)(\.git)?/\1/')
+# Detect the base/trunk branch (usually main or master)
+# Tries in order: remote HEAD, common trunk names (main, master), fallback to master
+# Returns: Branch name on stdout
+detect_base_branch() {
+    local base_branch=""
+    
+    # First, try to get the remote default branch using symbolic-ref
+    # This is the most reliable way to determine the true default branch
+    base_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "")
+    
+    if [ -z "$base_branch" ]; then
+        # Try common trunk branch names
+        for trunk in main master; do
+            if branch_exists_locally "$trunk" || branch_exists_remotely "$trunk"; then
+                base_branch="$trunk"
+                break
+            fi
+        done
+    fi
+    
+    # Default fallback
+    [ -z "$base_branch" ] && base_branch="master"
+    
+    echo "$base_branch"
+}
 
-echo ""
-echo "🚀 Creating PRs for each branch in the stack..."
+# Find all branches in the current stack
+# Arguments:
+#   $1 - current_branch: The branch we're currently on
+#   $2 - base_branch: The trunk branch (main/master)
+# Returns: Branch names sorted by commit count (earliest in stack first), one per line
+find_stack_branches() {
+    local current_branch="$1"
+    local base_branch="$2"
+    local candidate_branches=()
+    local temp_file
 
-# Create PRs for each branch
-PREV_BRANCH=""
-for BRANCH in "${BRANCH_ARRAY[@]}"; do
-	# Skip if branch doesn't exist remotely
-	if ! git ls-remote --exit-code --heads origin "$BRANCH" &> /dev/null; then
-		echo "⏭️  Skipping $BRANCH (not pushed yet)"
-		continue
-	fi
+    # Always include current branch
+    candidate_branches+=("$current_branch")
 
-	# Determine the base branch for this PR
-	# First branch in stack goes to trunk, others chain to previous branch
-	if [ -z "$PREV_BRANCH" ]; then
-		PR_BASE="$BASE_BRANCH"
-	else
-		PR_BASE="$PREV_BRANCH"
-	fi
-	
-	# Skip if trying to create PR from base branch to itself
-	if [ "$BRANCH" = "$PR_BASE" ]; then
-		echo "⏭️  Skipping $BRANCH (same as base branch)"
-		continue
-	fi
+    # Get all branches except base branch into an array to handle spaces safely
+    local all_branches=()
+    while IFS= read -r branch; do
+        [ -n "$branch" ] && all_branches+=("$branch")
+    done < <(git branch --format='%(refname:short)' | grep -vxF "$base_branch" || true)
 
-	# Check if PR already exists
-	EXISTING_PR=$(gh pr view "$BRANCH" --repo "$REPO" --json number,url 2>/dev/null || echo "")
-	if [ -n "$EXISTING_PR" ]; then
-		PR_NUMBER=$(echo "$EXISTING_PR" | jq -r '.number' 2>/dev/null || echo "")
-		PR_URL=$(echo "$EXISTING_PR" | jq -r '.url' 2>/dev/null || echo "")
-		if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
-			echo "✅ PR #$PR_NUMBER already exists for $BRANCH -> $PR_BASE"
-			if [ -n "$PR_URL" ] && [ "$PR_URL" != "null" ]; then
-				echo "   $PR_URL"
-			fi
-		else
-			echo "✅ PR already exists for $BRANCH"
-		fi
-	else
-		# Get commits that are ONLY in this branch, not in the base
-		# This ensures each PR only shows commits unique to that branch
-		COMMITS=$(git log "$PR_BASE".."$BRANCH" --oneline --format="%H" 2>/dev/null || echo "")
-		COMMIT_COUNT=$(echo "$COMMITS" | grep -c . || echo "0")
-		
-		if [ "$COMMIT_COUNT" -eq 0 ]; then
-			echo "⏭️  Skipping $BRANCH (no commits compared to $PR_BASE)"
-		else
-			# Get the first commit message as PR title (only from this branch's commits)
-			PR_TITLE=$(git log "$PR_BASE".."$BRANCH" --oneline --format="%s" | head -n1)
-			
-			# Fallback title if empty
-			if [ -z "$PR_TITLE" ]; then
-				PR_TITLE="$BRANCH"
-			fi
-			
-			# Get commit messages ONLY from this branch (not from parent branches)
-			PR_BODY=$(git log "$PR_BASE".."$BRANCH" --oneline --format="- %s" 2>/dev/null || echo "")
-			
-			# Add a header if we have commits
-			if [ -n "$PR_BODY" ]; then
-				PR_BODY="## Commits
+    # Find branches that are ancestors of current branch with unique commits
+    for other_branch in "${all_branches[@]}"; do
+        # Skip current branch (already added)
+        [ "$other_branch" = "$current_branch" ] && continue
 
-$PR_BODY"
-			fi
-			
-			echo "📝 Creating PR for $BRANCH -> $PR_BASE ($COMMIT_COUNT commit(s))"
-			PR_OUTPUT=$(gh pr create \
-				--base "$PR_BASE" \
-				--head "$BRANCH" \
-				--title "$PR_TITLE" \
-				--body "$PR_BODY" \
-				--repo "$REPO" 2>&1)
-			
-			if [ $? -eq 0 ]; then
-				echo "   ✅ Created PR for $BRANCH"
-				echo "   $PR_OUTPUT"
-			else
-				echo "   ⚠️  Failed to create PR for $BRANCH"
-				echo "   Error: $PR_OUTPUT"
-			fi
-		fi
-	fi
+        # Check if other_branch is an ancestor of current_branch
+        if is_ancestor "$other_branch" "$current_branch"; then
+            local commits_not_in_base
+            commits_not_in_base=$(get_commit_count "$base_branch" "$other_branch")
+            if [ "$commits_not_in_base" -gt 0 ]; then
+                candidate_branches+=("$other_branch")
+            fi
+        fi
+    done
+    
+    # Sort branches by commit count (fewest first = earliest in stack)
+    temp_file=$(mktemp)
+    trap 'rm -f "$temp_file"' EXIT
+    for branch in "${candidate_branches[@]}"; do
+        local commit_count
+        commit_count=$(get_commit_count "$base_branch" "$branch")
+        printf "%05d %s\n" "$commit_count" "$branch" >> "$temp_file"
+    done
+    
+    # Sort and output branch names
+    sort -n "$temp_file" | awk '{print $2}'
+    rm -f "$temp_file"
+    trap - EXIT
+}
 
-	PREV_BRANCH="$BRANCH"
-done
+# Push a single branch to remote with fallback strategies
+# Tries: regular push -> set upstream -> force-with-lease -> force (if enabled)
+# Arguments:
+#   $1 - branch: The branch name to push
+# Returns: 0 on success, 1 on failure
+push_branch() {
+    local branch="$1"
+    
+    if ! branch_exists_locally "$branch"; then
+        log_skip "Skipping $branch (branch doesn't exist locally)"
+        return 1
+    fi
+    
+    log_info "📤 Pushing $branch..."
+    
+    local exists_remotely="no"
+    if branch_exists_remotely "$branch"; then
+        exists_remotely="yes"
+    fi
+    
+    # Try regular push first
+    if git push origin "$branch" 2>/dev/null; then
+        log_success "Pushed $branch"
+        return 0
+    fi
+    
+    # If branch doesn't exist remotely, try setting upstream
+    if [ "$exists_remotely" = "no" ]; then
+        if git push -u origin "$branch" 2>/dev/null; then
+            log_success "Pushed $branch (set upstream)"
+            return 0
+        fi
+        log_warning "Failed to push $branch"
+        return 1
+    fi
+    
+    # Try force-with-lease (safer force push)
+    if git push --force-with-lease origin "$branch" 2>/dev/null; then
+        log_success "Force-pushed $branch (with lease)"
+        return 0
+    fi
+    
+    # Last resort: regular force push (requires explicit opt-in)
+    if [ "${ALLOW_FORCE_PUSH:-0}" = "1" ]; then
+        if git push --force origin "$branch" 2>/dev/null; then
+            log_success "Force-pushed $branch"
+            return 0
+        fi
+        log_warning "Failed to push $branch (even with force)"
+        return 1
+    fi
+    
+    log_warning "Failed to push $branch (force-with-lease failed; set ALLOW_FORCE_PUSH=1 to allow regular force push)"
+    return 1
+}
 
-echo ""
-echo "✅ Done! Stack pushed and PRs created."
+# Push all branches in the stack to remote
+# Arguments:
+#   $@ - branches: Array of branch names to push
+# Returns: 0 if all succeeded, 1 if any failed
+push_all_branches() {
+    local branches=("$@")
+    local push_failed=0
+    
+    log_info ""
+    log_info "📤 Pushing branches to remote..."
+    
+    for branch in "${branches[@]}"; do
+        if ! push_branch "$branch"; then
+            push_failed=1
+        fi
+    done
+    
+    if [ $push_failed -eq 1 ]; then
+        log_info ""
+        log_info "⚠️  Some branches failed to push. Continuing with PR creation..."
+    fi
+    
+    return $push_failed
+}
+
+# Check GitHub CLI prerequisites (installed and authenticated)
+# Returns: 0 if prerequisites met, 1 otherwise (with user-friendly messages)
+check_gh_prerequisites() {
+    # Check if GitHub CLI is available
+    if ! command -v gh &> /dev/null; then
+        log_info "⚠️  GitHub CLI (gh) is not installed."
+        log_info "   Install it with: brew install gh"
+        local repo_url=""
+        repo_url=$(git config --get remote.origin.url 2>/dev/null | sed -E 's/.*github.com[:/]([^/]+\/[^/]+)\.git/\1/' || true)
+        if [ -n "$repo_url" ]; then
+            log_info "   Or create PRs manually at: https://github.com/$repo_url"
+        fi
+        return 1
+    fi
+    
+    # Check if authenticated with GitHub
+    if ! gh auth status &> /dev/null; then
+        log_info "⚠️  Not authenticated with GitHub CLI."
+        log_info "   Run: gh auth login"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Get the repository name from remote URL (owner/repo format)
+# Returns: Repository name on stdout (e.g., "owner/repo")
+get_repo_name() {
+    local repo_url=""
+    repo_url=$(git config --get remote.origin.url 2>/dev/null || true)
+    if [ -n "$repo_url" ]; then
+        # Extract owner/repo and explicitly strip .git suffix
+        local repo_name
+        repo_name=$(echo "$repo_url" | sed -E 's/.*github.com[:/]([^/]+\/[^/]+)$/\1/' 2>/dev/null || echo "")
+        # Remove .git suffix if present
+        repo_name="${repo_name%.git}"
+        echo "$repo_name"
+    else
+        # Fallback to GITHUB_REPOSITORY env var if available
+        echo "${GITHUB_REPOSITORY:-}"
+    fi
+}
+
+# Create a PR for a single branch
+# Return codes:
+#   0 - Success (PR created or already exists)
+#   1 - Error (failed to create PR)
+#   2 - Skipped (branch not pushed or same as base - should not update prev_branch)
+#   3 - Skipped (no commits compared to base - should still update prev_branch)
+create_pr_for_branch() {
+    local branch="$1"
+    local pr_base="$2"
+    local repo="$3"
+    
+    # Skip if branch doesn't exist remotely
+    if ! branch_exists_remotely "$branch"; then
+        log_skip "Skipping $branch (not pushed yet)"
+        return 2
+    fi
+    
+    # Skip if branch equals base
+    if [ "$branch" = "$pr_base" ]; then
+        log_skip "Skipping $branch (same as base branch)"
+        return 2
+    fi
+    
+    # Check if PR already exists
+    local pr_number pr_url
+    pr_number=$(gh pr view "$branch" --repo "$repo" --jq '.number' 2>/dev/null || echo "")
+    pr_url=$(gh pr view "$branch" --repo "$repo" --jq '.url' 2>/dev/null || echo "")
+    
+    if [ -n "$pr_number" ] && [ "$pr_number" != "null" ] && [ "$pr_number" != "" ]; then
+        log_info "✅ PR #$pr_number already exists for $branch -> $pr_base"
+        [ -n "$pr_url" ] && [ "$pr_url" != "null" ] && log_info "   $pr_url"
+        return 0
+    fi
+    
+    # Get commits unique to this branch
+    local commit_count
+    commit_count=$(get_commit_count "$pr_base" "$branch")
+    
+    if [ "$commit_count" -eq 0 ]; then
+        log_skip "Skipping $branch (no commits compared to $pr_base)"
+        # Return 3 to indicate "no commits" skip - prev_branch should still be updated
+        # to maintain the PR chain structure for subsequent branches
+        return 3
+    fi
+    
+    # Generate PR title from first commit message
+    local pr_title
+    pr_title=$(git log "$pr_base".."$branch" --oneline --format="%s" 2>/dev/null | head -n1 || echo "")
+    [ -z "$pr_title" ] && pr_title="$branch"
+    
+    # Generate PR body from commit messages
+    local pr_body
+    pr_body=$(git log "$pr_base".."$branch" --oneline --format="- %s" 2>/dev/null || echo "")
+    
+    if [ -n "$pr_body" ]; then
+        pr_body="## Commits
+
+$pr_body"
+    fi
+    
+    # Create the PR
+    log_info "📝 Creating PR for $branch -> $pr_base ($commit_count commit(s))"
+    
+    local pr_output
+    if pr_output=$(gh pr create \
+        --base "$pr_base" \
+        --head "$branch" \
+        --title "$pr_title" \
+        --body "$pr_body" \
+        --repo "$repo" 2>&1); then
+        log_success "Created PR for $branch"
+        log_info "   $pr_output"
+    else
+        log_warning "Failed to create PR for $branch"
+        log_info "   Error: $pr_output"
+        return 1
+    fi
+}
+
+# Create PRs for all branches in the stack
+# Creates chained PRs where each branch targets the previous one in the stack
+# Arguments:
+#   $1 - base_branch: The trunk branch (first PR targets this)
+#   $@ - branches: Array of branch names in stack order
+# Returns: 0 if all PRs created/exist, 1 if any failed
+create_all_prs() {
+    local base_branch="$1"
+    shift
+    local branches=("$@")
+    local repo
+    local pr_failed=0
+    
+    repo=$(get_repo_name)
+    
+    log_info ""
+    log_info "🚀 Creating PRs for each branch in the stack..."
+    
+    local prev_branch=""
+    for branch in "${branches[@]}"; do
+        local pr_base
+        if [ -z "$prev_branch" ]; then
+            pr_base="$base_branch"
+        else
+            pr_base="$prev_branch"
+        fi
+        
+        local result=0
+        create_pr_for_branch "$branch" "$pr_base" "$repo" || result=$?
+        
+        # Track PR creation failures (return code 1)
+        if [ $result -eq 1 ]; then
+            pr_failed=1
+        fi
+        
+        # Update prev_branch to maintain PR chain structure
+        # Return code 2 means the branch was skipped (not pushed or same as base) - don't update chain
+        # Return code 3 means no commits but branch exists - still update chain to preserve structure
+        # This ensures subsequent branches target the correct base in the stack
+        if [ $result -ne 2 ]; then
+            prev_branch="$branch"
+        fi
+    done
+    
+    if [ $pr_failed -eq 1 ]; then
+        log_info ""
+        log_info "⚠️  Some PRs failed to create."
+    fi
+    
+    return $pr_failed
+}
+
+# Display the stack summary showing all branches and their commit counts
+# Arguments:
+#   $1 - base_branch: The trunk branch
+#   $@ - branches: Array of branch names in the stack
+display_stack_summary() {
+    local base_branch="$1"
+    shift
+    local branches=("$@")
+    
+    log_info "📋 Found ${#branches[@]} branch(es) in stack:"
+    for branch in "${branches[@]}"; do
+        local commit_count
+        commit_count=$(get_commit_count "$base_branch" "$branch")
+        log_info "  - $branch ($commit_count commits from $base_branch)"
+    done
+}
+
+# =============================================================================
+# Main Execution
+# =============================================================================
+
+# Main entry point - orchestrates the stack submission workflow
+# 1. Detects branches in the stack
+# 2. Pushes all branches to remote
+# 3. Creates chained PRs for each branch
+main() {
+    log_info "$SCRIPT_NAME v$VERSION"
+    
+    # Get current and base branches
+    local current_branch base_branch
+    current_branch=$(get_current_branch)
+    base_branch=$(detect_base_branch)
+
+    # Find all branches in the stack
+    log_info "🔍 Getting branches in stack..."
+
+    local branch_array=()
+    while IFS= read -r branch; do
+        [ -n "$branch" ] && branch_array+=("$branch")
+    done <<< "$(find_stack_branches "$current_branch" "$base_branch")"
+
+    # Display stack summary
+    display_stack_summary "$base_branch" "${branch_array[@]}"
+
+    # Track overall status
+    local push_status=0
+    local pr_status=0
+
+    # Push all branches
+    push_all_branches "${branch_array[@]}" || push_status=$?
+
+    # Check prerequisites and create PRs
+    if check_gh_prerequisites; then
+        create_all_prs "$base_branch" "${branch_array[@]}" || pr_status=$?
+    else
+        pr_status=1
+    fi
+
+    # Display appropriate final message based on results
+    log_info ""
+    if [ $push_status -eq 0 ] && [ $pr_status -eq 0 ]; then
+        log_info "✅ Done! Stack pushed and PRs created successfully."
+    elif [ $push_status -ne 0 ] && [ $pr_status -ne 0 ]; then
+        log_info "⚠️  Done with issues: Some branches failed to push and some PRs failed to create."
+    elif [ $push_status -ne 0 ]; then
+        log_info "⚠️  Done with issues: Some branches failed to push."
+    else
+        log_info "⚠️  Done with issues: Some PRs failed to create."
+    fi
+}
+
+# Run main function
+main "$@"
