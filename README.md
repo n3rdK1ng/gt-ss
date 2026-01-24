@@ -1,10 +1,10 @@
 # gt-ss
 
-A bash script that automates the process of pushing all branches in a git stack and creating chained pull requests for each branch using GitHub CLI.
+A TypeScript CLI tool (using Bun runtime) that automates the process of pushing all branches in a git stack and creating chained pull requests for each branch using GitHub CLI.
 
 ## What it does
 
-The `stack-submit.sh` script:
+The `gt-ss` tool:
 
 - Finds all branches in your git stack (branches that are ancestors of the current branch)
 - Pushes all branches in the stack to the remote repository
@@ -13,6 +13,8 @@ The `stack-submit.sh` script:
 
 ## Prerequisites
 
+- **Bun** - Runtime for executing TypeScript
+  - Install with: `curl -fsSL https://bun.sh/install | bash` or `brew install bun`
 - **Git** - Must be installed and configured
 - **GitHub CLI (gh)** - Required for PR creation
   - Install with: `brew install gh` (macOS) or your package manager
@@ -20,28 +22,37 @@ The `stack-submit.sh` script:
 
 ## Setup
 
-### 1. Clone or download this repository
+### 1. Clone this repository
 
-Clone this repository to your desired location, or download the `stack-submit.sh` script.
+```bash
+git clone <repository-url>
+cd gt-ss
+```
 
-### 2. Add the alias function to your `.zshrc`
+### 2. Install dependencies
+
+```bash
+bun install
+```
+
+### 3. Add the alias function to your `.zshrc`
 
 Add the following function to your `~/.zshrc` file to intercept `gt ss` commands:
 
 ```bash
 # Override gt command to intercept 'gt ss' for stack submit with PR creation
 gt() {
-	if [ "$1" = "ss" ]; then
-		bash /path/to/gt-ss/stack-submit.sh
-	else
-		command gt "$@"
-	fi
+  if [ "$1" = "ss" ]; then
+    ( cd /path/to/gt-ss && bun run src/index.ts )
+  else
+    command gt "$@"
+  fi
 }
 ```
 
-**Important:** Replace `/path/to/gt-ss/stack-submit.sh` with the actual absolute path to the `stack-submit.sh` script in this repository.
+**Important:** Replace `/path/to/gt-ss` with the actual absolute path to this repository.
 
-### 3. Reload your shell configuration
+### 4. Reload your shell configuration
 
 After adding the function, either:
 
@@ -56,7 +67,17 @@ Once set up, simply run:
 gt ss
 ```
 
-The script will:
+You can also run it directly:
+
+```bash
+# Using npm script
+bun run start
+
+# Or directly
+bun run src/index.ts
+```
+
+The tool will:
 
 1. Detect all branches in your current stack
 2. Push them to the remote repository
@@ -87,16 +108,16 @@ gt ss
 
 ## How it works
 
-1. **Branch Detection**: The script finds all branches that are ancestors of the current branch and have unique commits compared to the base branch (usually `main` or `master`).
+1. **Branch Detection**: The tool finds all branches that are ancestors of the current branch and have unique commits compared to the base branch (usually `main` or `master`).
 
 2. **Branch Ordering**: Branches are sorted by the number of commits from the base branch, ensuring the correct order for chained PRs.
 
-3. **Pushing**: Each branch is pushed to the remote. The script tries:
+3. **Pushing**: Each branch is pushed to the remote. The tool tries:
 
    - Regular push first
    - Setting upstream if branch doesn't exist remotely
    - Force-with-lease (safer force push)
-   - Regular force push as last resort
+   - Regular force push as last resort (requires `ALLOW_FORCE_PUSH=1` environment variable)
 
 4. **PR Creation**: For each branch:
    - First branch in stack → base branch (main/master)
@@ -105,22 +126,43 @@ gt ss
    - PR body lists all commits in that branch
    - Skips if PR already exists
 
+## Development
+
+```bash
+bun test        # Run all tests
+bun run lint    # Check for linting issues
+bun run lint:fix  # Auto-fix linting issues
+bun run format  # Format code
+```
+
+## Environment Variables
+
+- `ALLOW_FORCE_PUSH=1` - Enable regular force push as last resort (disabled by default for safety)
+
 ## Troubleshooting
+
+### Bun not installed
+
+```text
+⚠️  Bun is not installed.
+   Install it with: curl -fsSL https://bun.sh/install | bash
+   Or: brew install bun
+```
 
 ### GitHub CLI not installed
 
-```
+```text
 ⚠️  GitHub CLI (gh) is not installed.
    Install it with: brew install gh
 ```
 
 ### Not authenticated with GitHub
 
-```
+```text
 ⚠️  Not authenticated with GitHub CLI.
    Run: gh auth login
 ```
 
 ### Some branches failed to push
 
-The script will continue with PR creation even if some branches fail to push. Check the output for specific error messages.
+The tool will continue with PR creation even if some branches fail to push. Check the output for specific error messages.
