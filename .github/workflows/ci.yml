@@ -1,0 +1,147 @@
+# =============================================================================
+# CI Pipeline for stack-submit.sh
+# =============================================================================
+# This workflow runs tests and linting on every push and pull request
+# to ensure code quality and correct functionality.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+  # Allow manual trigger
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # Lint Job - Static Analysis
+  # ===========================================================================
+  lint:
+    name: Lint & Static Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Check bash syntax
+        run: |
+          echo "Checking bash syntax..."
+          bash -n stack-submit.sh
+          echo "✓ Syntax check passed"
+      
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          severity: warning
+          additional_files: 'stack-submit.sh'
+        continue-on-error: true  # Don't fail the build on shellcheck warnings
+
+  # ===========================================================================
+  # Test Job - Run Test Suite
+  # ===========================================================================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install BATS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+      
+      - name: Configure Git for tests
+        run: |
+          git config --global user.email "test@example.com"
+          git config --global user.name "Test User"
+      
+      - name: Make test files executable
+        run: |
+          chmod +x tests/run-tests.sh tests/stack-submit.bats
+          chmod +x stack-submit.sh
+      
+      - name: Run tests
+        run: ./tests/run-tests.sh
+      
+      - name: Run tests with verbose output (on failure)
+        if: failure()
+        run: bats --verbose-run tests/stack-submit.bats
+
+  # ===========================================================================
+  # Test Matrix - Multiple OS Support
+  # ===========================================================================
+  test-matrix:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install BATS (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats
+      
+      - name: Install BATS (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew install bats-core
+      
+      - name: Configure Git for tests
+        run: |
+          git config --global user.email "test@example.com"
+          git config --global user.name "Test User"
+      
+      - name: Make test files executable
+        run: |
+          chmod +x tests/run-tests.sh tests/stack-submit.bats
+          chmod +x stack-submit.sh
+      
+      - name: Run tests
+        run: ./tests/run-tests.sh
+
+  # ===========================================================================
+  # Summary Job
+  # ===========================================================================
+  ci-success:
+    name: CI Success
+    needs: [lint, test, test-matrix]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.lint.result }}" == "success" && \
+                "${{ needs.test.result }}" == "success" && \
+                "${{ needs.test-matrix.result }}" == "success" ]]; then
+            echo "✅ All CI checks passed!"
+            exit 0
+          else
+            echo "❌ Some CI checks failed"
+            echo "Lint: ${{ needs.lint.result }}"
+            echo "Test: ${{ needs.test.result }}"
+            echo "Test Matrix: ${{ needs.test-matrix.result }}"
+            exit 1
+          fi

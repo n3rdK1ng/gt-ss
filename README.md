@@ -1,5 +1,7 @@
 # gt-ss
 
+[![CI](https://github.com/n3rdK1ng/gt-ss/actions/workflows/ci.yml/badge.svg)](https://github.com/n3rdK1ng/gt-ss/actions/workflows/ci.yml)
+
 A bash script that automates the process of pushing all branches in a git stack and creating chained pull requests for each branch using GitHub CLI.
 
 ## What it does
@@ -124,3 +126,33 @@ gt ss
 ### Some branches failed to push
 
 The script will continue with PR creation even if some branches fail to push. Check the output for specific error messages.
+
+## Development
+
+### Running Tests
+
+Tests are written using [BATS (Bash Automated Testing System)](https://github.com/bats-core/bats-core).
+
+```bash
+# Install BATS
+# macOS: brew install bats-core
+# Ubuntu: sudo apt-get install bats
+
+# Run tests
+./tests/run-tests.sh
+
+# Run with verbose output
+./tests/run-tests.sh --verbose
+```
+
+### CI/CD
+
+This project uses GitHub Actions for continuous integration. The pipeline runs on:
+- Every push to `master`/`main` branches
+- Every pull request
+
+The CI pipeline includes:
+- Bash syntax validation
+- ShellCheck static analysis
+- Full test suite execution
+- Cross-platform testing (Ubuntu and macOS)
