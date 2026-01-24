@@ -1,0 +1,105 @@
+# =============================================================================
+# Release Workflow for stack-submit.sh
+# =============================================================================
+# This workflow automates the release process when a version tag is pushed.
+# It creates a GitHub Release with the changelog for that version.
+#
+# Usage:
+#   1. Update VERSION file with new version number
+#   2. Update CHANGELOG.md with release notes
+#   3. Commit changes: git commit -m "chore: release v1.2.3"
+#   4. Create tag: git tag -a v1.2.3 -m "Release v1.2.3"
+#   5. Push with tags: git push origin main --tags
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # Trigger on version tags (e.g., v1.0.0, v2.1.3)
+
+permissions:
+  contents: write  # Required for creating releases
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for changelog generation
+      
+      - name: Get version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+      
+      - name: Verify VERSION file matches tag
+        run: |
+          FILE_VERSION=$(cat VERSION | tr -d '[:space:]')
+          TAG_VERSION=${{ steps.version.outputs.version }}
+          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
+            echo "ERROR: VERSION file ($FILE_VERSION) does not match tag ($TAG_VERSION)"
+            exit 1
+          fi
+          echo "✓ VERSION file matches tag: $TAG_VERSION"
+      
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          # Extract the changelog section for this version
+          VERSION=${{ steps.version.outputs.version }}
+          
+          # Extract content between this version header and the next version header
+          CHANGELOG_CONTENT=$(awk -v ver="## \\[$VERSION\\]" '
+            $0 ~ ver { found=1; next }
+            /^## \[/ && found { exit }
+            found { print }
+          ' CHANGELOG.md)
+          
+          # If no specific changelog found, use a default message
+          if [ -z "$CHANGELOG_CONTENT" ]; then
+            CHANGELOG_CONTENT="Release version $VERSION"
+          fi
+          
+          # Save to file for multiline support
+          echo "$CHANGELOG_CONTENT" > /tmp/changelog.md
+          echo "changelog_file=/tmp/changelog.md" >> $GITHUB_OUTPUT
+      
+      - name: Run tests before release
+        run: |
+          chmod +x stack-submit.sh
+          bash -n stack-submit.sh
+          echo "✓ Syntax check passed"
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release ${{ steps.version.outputs.tag }}
+          body_path: /tmp/changelog.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          files: |
+            stack-submit.sh
+            CHANGELOG.md
+            README.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Release Summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: ${{ steps.version.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Changelog" >> $GITHUB_STEP_SUMMARY
+          cat /tmp/changelog.md >> $GITHUB_STEP_SUMMARY

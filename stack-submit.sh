@@ -3,6 +3,10 @@
 # =============================================================================
 # stack-submit.sh - Automated stacked PR creation tool
 # =============================================================================
+# Version: 1.0.0
+# Repository: https://github.com/n3rdK1ng/gt-ss
+# License: MIT
+#
 # This script automates the process of pushing branches and creating chained
 # pull requests for git stacks.
 #

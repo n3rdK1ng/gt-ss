@@ -1,5 +1,9 @@
 # gt-ss
 
+[![CI](https://github.com/n3rdK1ng/gt-ss/actions/workflows/ci.yml/badge.svg)](https://github.com/n3rdK1ng/gt-ss/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/n3rdK1ng/gt-ss)](https://github.com/n3rdK1ng/gt-ss/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A bash script that automates the process of pushing all branches in a git stack and creating chained pull requests for each branch using GitHub CLI.
 
 ## What it does
@@ -124,3 +128,23 @@ gt ss
 ### Some branches failed to push
 
 The script will continue with PR creation even if some branches fail to push. Check the output for specific error messages.
+
+## Versioning
+
+This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+- **Current Version**: See [VERSION](VERSION) file
+- **Release History**: See [CHANGELOG.md](CHANGELOG.md)
+- **Releases**: Available on the [Releases page](https://github.com/n3rdK1ng/gt-ss/releases)
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
+- Development workflow
+- Versioning strategy
+- Release process
+- Commit conventions
+
+## License
+
+This project is licensed under the MIT License.
