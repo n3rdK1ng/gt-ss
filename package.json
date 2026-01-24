@@ -1,0 +1,26 @@
+{
+	"name": "gt-ss",
+	"version": "1.0.0",
+	"module": "src/index.ts",
+	"type": "module",
+	"private": true,
+	"bin": {
+		"stack-submit": "./src/index.ts"
+	},
+	"scripts": {
+		"start": "bun run src/index.ts",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit",
+		"lint": "biome check --write --no-errors-on-unmatched"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.3.12",
+		"@types/bun": "latest"
+	},
+	"peerDependencies": {
+		"typescript": "^5"
+	},
+	"dependencies": {
+		"zod": "^4.3.6"
+	}
+}
