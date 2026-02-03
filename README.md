@@ -40,10 +40,9 @@ bun install
 Add the following function to your `~/.zshrc` file to intercept `gt ss` commands:
 
 ```bash
-# Override gt command to intercept 'gt ss' for stack submit with PR creation
 gt() {
   if [ "$1" = "ss" ]; then
-    ( cd /path/to/gt-ss && bun run src/index.ts )
+    bun run /path/to/gt-ss/src/index.ts
   else
     command gt "$@"
   fi
