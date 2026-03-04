@@ -5,25 +5,34 @@
 import { branchExistsLocally, branchExistsRemotely } from "#/git/branch";
 import { git } from "#/shell/exec";
 
+const TRUNK_BRANCHES = ["main", "master"] as const;
+
 /**
  * Detect the base/trunk branch (usually main or master)
- * Tries in order: remote HEAD, common trunk names (main, master), fallback to master
+ * Tries in order: BASE_BRANCH env, remote HEAD (only if it's main/master), common trunk names, fallback to master
  */
 export const detectBaseBranch = async () => {
-	// First, try to get the remote default branch using symbolic-ref
+	// Explicit override (e.g. when remote default is a feature branch)
+	const envBase = process.env.BASE_BRANCH?.trim();
+	if (envBase) {
+		return envBase;
+	}
+
+	// Get remote default branch; only trust it if it's a known trunk (main/master).
+	// Otherwise origin/HEAD may point to a feature branch and we fall through.
 	const symRefResult = await git({
 		args: ["symbolic-ref", "refs/remotes/origin/HEAD"],
 	});
 
 	if (symRefResult.exitCode === 0 && symRefResult.stdout) {
-		const branch = symRefResult.stdout.replace("refs/remotes/origin/", "");
-		if (branch) {
+		const branch = symRefResult.stdout.replace("refs/remotes/origin/", "").trim();
+		if (branch && (TRUNK_BRANCHES as readonly string[]).includes(branch)) {
 			return branch;
 		}
 	}
 
 	// Try common trunk branch names
-	const trunkBranches = ["main", "master"];
+	const trunkBranches = [...TRUNK_BRANCHES];
 
 	for (const trunk of trunkBranches) {
 		const existsLocally = await branchExistsLocally({ branch: trunk });
@@ -51,7 +60,7 @@ export const getRepoName = async () => {
 		return process.env.GITHUB_REPOSITORY ?? "";
 	}
 
-	const url = result.stdout;
+	const url = result.stdout.trim();
 
 	// Extract owner/repo from various URL formats:
 	// - https://github.com/owner/repo.git
