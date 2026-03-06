@@ -3,7 +3,7 @@
  */
 
 import { branchExistsLocally, branchExistsRemotely } from "#/git/branch";
-import { git } from "#/shell/exec";
+import { gh, git } from "#/shell/exec";
 
 const TRUNK_BRANCHES = ["main", "master"] as const;
 
@@ -52,15 +52,26 @@ export const detectBaseBranch = async () => {
 
 /**
  * Get the repository name from remote URL (owner/repo format)
+ * Tries gh CLI first (most reliable), then falls back to parsing remote URL
  */
 export const getRepoName = async () => {
+	// Try gh CLI first — works regardless of remote URL format
+	const ghResult = await gh({
+		args: ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
+	});
+
+	if (ghResult.exitCode === 0 && ghResult.stdout) {
+		return ghResult.stdout;
+	}
+
+	// Fallback: parse remote URL
 	const result = await git({ args: ["config", "--get", "remote.origin.url"] });
 
 	if (result.exitCode !== 0 || !result.stdout) {
 		return process.env.GITHUB_REPOSITORY ?? "";
 	}
 
-	const url = result.stdout.trim();
+	const url = result.stdout;
 
 	// Extract owner/repo from various URL formats:
 	// - https://github.com/owner/repo.git
